@@ -604,137 +604,131 @@ async def chat_completion_files_handler(body):
 
 class ChatCompletionMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.method == "POST" and any(
-            endpoint in request.url.path
-            for endpoint in ["/ollama/api/chat", "/chat/completions"]
+        print(call_next.__name__)
+        if not (
+            request.method == "POST"
+            and any(
+                endpoint in request.url.path
+                for endpoint in ["/ollama/api/chat", "/chat/completions"]
+            )
         ):
-            log.debug(f"request.url.path: {request.url.path}")
-
-            try:
-                body, model, user = await get_body_and_model_and_user(request)
-            except Exception as e:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"detail": str(e)},
-                )
-
-            # Extract session_id, chat_id and message_id from the request body
-            session_id = None
-            if "session_id" in body:
-                session_id = body["session_id"]
-                del body["session_id"]
-            chat_id = None
-            if "chat_id" in body:
-                chat_id = body["chat_id"]
-                del body["chat_id"]
-            message_id = None
-            if "id" in body:
-                message_id = body["id"]
-                del body["id"]
-
-            async def __event_emitter__(data):
-                await sio.emit(
-                    "chat-events",
-                    {
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "data": data,
-                    },
-                    to=session_id,
-                )
-
-            async def __event_call__(data):
-                response = await sio.call(
-                    "chat-events",
-                    {"chat_id": chat_id, "message_id": message_id, "data": data},
-                    to=session_id,
-                )
-                return response
-
-            # Initialize data_items to store additional data to be sent to the client
-            data_items = []
-
-            # Initialize context, and citations
-            contexts = []
-            citations = []
-
-            try:
-                body, flags = await chat_completion_functions_handler(
-                    body, model, user, __event_emitter__, __event_call__
-                )
-            except Exception as e:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"detail": str(e)},
-                )
-
-            try:
-                body, flags = await chat_completion_tools_handler(
-                    body, user, __event_emitter__, __event_call__
-                )
-
-                contexts.extend(flags.get("contexts", []))
-                citations.extend(flags.get("citations", []))
-            except Exception as e:
-                print(e)
-                pass
-
-            try:
-                body, flags = await chat_completion_files_handler(body)
-
-                contexts.extend(flags.get("contexts", []))
-                citations.extend(flags.get("citations", []))
-            except Exception as e:
-                print(e)
-                pass
-
-            # If context is not empty, insert it into the messages
-            if len(contexts) > 0:
-                context_string = "/n".join(contexts).strip()
-                prompt = get_last_user_message(body["messages"])
-                body["messages"] = add_or_update_system_message(
-                    rag_template(
-                        rag_app.state.config.RAG_TEMPLATE, context_string, prompt
-                    ),
-                    body["messages"],
-                )
-
-            # If there are citations, add them to the data_items
-            if len(citations) > 0:
-                data_items.append({"citations": citations})
-
-            modified_body_bytes = json.dumps(body).encode("utf-8")
-            # Replace the request body with the modified one
-            request._body = modified_body_bytes
-            # Set custom header to ensure content-length matches new body length
-            request.headers.__dict__["_list"] = [
-                (b"content-length", str(len(modified_body_bytes)).encode("utf-8")),
-                *[
-                    (k, v)
-                    for k, v in request.headers.raw
-                    if k.lower() != b"content-length"
-                ],
-            ]
-
             response = await call_next(request)
-            if isinstance(response, StreamingResponse):
-                # If it's a streaming response, inject it as SSE event or NDJSON line
-                content_type = response.headers.get("Content-Type")
-                if "text/event-stream" in content_type:
-                    return StreamingResponse(
-                        self.openai_stream_wrapper(response.body_iterator, data_items),
-                    )
-                if "application/x-ndjson" in content_type:
-                    return StreamingResponse(
-                        self.ollama_stream_wrapper(response.body_iterator, data_items),
-                    )
+            return response
+        log.debug(f"request.url.path: {request.url.path}")
 
-                return response
-            else:
-                return response
+        try:
+            body, model, user = await get_body_and_model_and_user(request)
+        except Exception as e:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": str(e)},
+            )
 
-        # If it's not a chat completion request, just pass it through
+        # Extract session_id, chat_id and message_id from the request body
+        session_id = None
+        if "session_id" in body:
+            session_id = body["session_id"]
+            del body["session_id"]
+        chat_id = None
+        if "chat_id" in body:
+            chat_id = body["chat_id"]
+            del body["chat_id"]
+        message_id = None
+        if "id" in body:
+            message_id = body["id"]
+            del body["id"]
+
+        async def __event_emitter__(data):
+            await sio.emit(
+                "chat-events",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "data": data,
+                },
+                to=session_id,
+            )
+
+        async def __event_call__(data):
+            response = await sio.call(
+                "chat-events",
+                {"chat_id": chat_id, "message_id": message_id, "data": data},
+                to=session_id,
+            )
+            return response
+
+        # Initialize data_items to store additional data to be sent to the client
+        data_items = []
+
+        # Initialize context, and citations
+        contexts = []
+        citations = []
+
+        try:
+            body, flags = await chat_completion_functions_handler(
+                body, model, user, __event_emitter__, __event_call__
+            )
+        except Exception as e:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": str(e)},
+            )
+
+        try:
+            body, flags = await chat_completion_tools_handler(
+                body, user, __event_emitter__, __event_call__
+            )
+
+            contexts.extend(flags.get("contexts", []))
+            citations.extend(flags.get("citations", []))
+        except Exception as e:
+            print(e)
+            pass
+
+        try:
+            body, flags = await chat_completion_files_handler(body)
+
+            contexts.extend(flags.get("contexts", []))
+            citations.extend(flags.get("citations", []))
+        except Exception as e:
+            print(e)
+            pass
+
+        # If context is not empty, insert it into the messages
+        if len(contexts) > 0:
+            context_string = "/n".join(contexts).strip()
+            prompt = get_last_user_message(body["messages"])
+            body["messages"] = add_or_update_system_message(
+                rag_template(rag_app.state.config.RAG_TEMPLATE, context_string, prompt),
+                body["messages"],
+            )
+
+        # If there are citations, add them to the data_items
+        if len(citations) > 0:
+            data_items.append({"citations": citations})
+
+        modified_body_bytes = json.dumps(body).encode("utf-8")
+        # Replace the request body with the modified one
+        request._body = modified_body_bytes
+        # Set custom header to ensure content-length matches new body length
+        request.headers.__dict__["_list"] = [
+            (b"content-length", str(len(modified_body_bytes)).encode("utf-8")),
+            *[(k, v) for k, v in request.headers.raw if k.lower() != b"content-length"],
+        ]
+
         response = await call_next(request)
+        if isinstance(response, StreamingResponse):
+            # If it's a streaming response, inject it as SSE event or NDJSON line
+            content_type = response.headers.get("Content-Type")
+            if "text/event-stream" in content_type:
+                return StreamingResponse(
+                    self.openai_stream_wrapper(response.body_iterator, data_items),
+                )
+            if "application/x-ndjson" in content_type:
+                return StreamingResponse(
+                    self.ollama_stream_wrapper(response.body_iterator, data_items),
+                )
+
         return response
 
     async def _receive(self, body: bytes):
