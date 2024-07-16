@@ -6,7 +6,8 @@ import pkgutil
 import chromadb
 from chromadb import Settings
 from bs4 import BeautifulSoup
-from typing import TypeVar, Generic
+import base64
+import hashlib
 from pydantic import BaseModel
 from typing import Optional
 
@@ -200,51 +201,42 @@ try:
 except:
     CONFIG_DATA = {}
 
+####################################
+# WEBUI_SECRET_KEY
+####################################
+
+WEBUI_SECRET_KEY = os.environ.get(
+    "WEBUI_SECRET_KEY",
+    os.environ.get(
+        "WEBUI_JWT_SECRET_KEY", "t0p-s3cr3t"
+    ),  # DEPRECATED: remove at next major version
+)
+
 
 ####################################
 # Config helpers
 ####################################
 
+def secret_key_to_fernet(secret_key: str) -> bytes:
+    # convert to bytes
+    encoded = secret_key.encode()
+    # sha256 hash to make sure the length is correct
+    hashed = hashlib.sha256(encoded).digest()
+    # return the first 32 bytes
+    return base64.urlsafe_b64encode(hashed)[:32]
 
-def save_config():
-    try:
-        with open(f"{DATA_DIR}/config.json", "w") as f:
-            json.dump(CONFIG_DATA, f, indent="\t")
-    except Exception as e:
-        log.exception(e)
-
-
-def get_config_value(config_path: str):
-    path_parts = config_path.split(".")
-    cur_config = CONFIG_DATA
-    for key in path_parts:
-        if key in cur_config:
-            cur_config = cur_config[key]
-        else:
-            return None
-    return cur_config
-
-
-T = TypeVar("T")
-
-
-class PersistentConfig(Generic[T]):
-    def __init__(self, env_name: str, config_path: str, env_value: T):
+class PersistentConfig:
+    def __init__(self, env_name: str, config_path: str, env_value):
         self.env_name = env_name
         self.config_path = config_path
         self.env_value = env_value
-        self.config_value = get_config_value(config_path)
-        if self.config_value is not None:
-            log.info(f"'{env_name}' loaded from config.json")
-            self.value = self.config_value
-        else:
-            self.value = env_value
+        self.load()
 
     def __str__(self):
         return str(self.value)
 
     @property
-    def __dict__(self):
+    def __dict__(self):  # type: ignore
         raise TypeError(
             "PersistentConfig object cannot be converted to dict, use config_get or .value instead."
         )
@@ -256,11 +248,24 @@ class PersistentConfig(Generic[T]):
             )
         return super().__getattribute__(item)
 
+    def load(self):
+        path_parts = self.config_path.split(".")
+        cur_config = CONFIG_DATA
+        for key in path_parts:
+            if key in cur_config:
+                cur_config = cur_config[key]
+            else:
+                self.value = self.env_value
+                break
+        else:
+            self.config_value = cur_config
+            self.value = self.config_value
+            log.info(f"'{self.env_name}' loaded from config.json")
+
     def save(self):
         # Don't save if the value is the same as the env value and the config value
-        if self.env_value == self.value:
-            if self.config_value == self.value:
-                return
+        if self.env_value == self.value == self.config_value:
+            return
         log.info(f"Saving '{self.env_name}' to config.json")
         path_parts = self.config_path.split(".")
         config = CONFIG_DATA
@@ -269,8 +274,21 @@ class PersistentConfig(Generic[T]):
                 config[key] = {}
             config = config[key]
         config[path_parts[-1]] = self.value
-        save_config()
+        try:
+            with open(f"{DATA_DIR}/config.json", "w") as f:
+                json.dump(CONFIG_DATA, f, indent="\t")
+        except Exception as e:
+            log.exception(e)
         self.config_value = self.value
+
+
+class SecretConfig(PersistentConfig):
+    def __init__(self, env_name: str, config_path: str, env_value):
+        self.encryped_env_name = f"{env_name}_ENCRYPTED"
+        super().__init__(env_name, config_path, env_value)
+
+    def load(self):
+        pass
 
 
 class AppConfig:
@@ -899,15 +917,8 @@ If a function tool doesn't match the query, return an empty string. Else, pick a
 
 
 ####################################
-# WEBUI_SECRET_KEY
+# WEBUI_SESSION_COOKIE_SAME_SITE
 ####################################
-
-WEBUI_SECRET_KEY = os.environ.get(
-    "WEBUI_SECRET_KEY",
-    os.environ.get(
-        "WEBUI_JWT_SECRET_KEY", "t0p-s3cr3t"
-    ),  # DEPRECATED: remove at next major version
-)
 
 WEBUI_SESSION_COOKIE_SAME_SITE = os.environ.get(
     "WEBUI_SESSION_COOKIE_SAME_SITE",
@@ -996,7 +1007,7 @@ RAG_EMBEDDING_MODEL = PersistentConfig(
     "rag.embedding_model",
     os.environ.get("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
 )
-log.info(f"Embedding model set: {RAG_EMBEDDING_MODEL.value}"),
+log.info(f"Embedding model set: {RAG_EMBEDDING_MODEL.value}")
 
 RAG_EMBEDDING_MODEL_AUTO_UPDATE = (
     os.environ.get("RAG_EMBEDDING_MODEL_AUTO_UPDATE", "").lower() == "true"
@@ -1018,7 +1029,7 @@ RAG_RERANKING_MODEL = PersistentConfig(
     os.environ.get("RAG_RERANKING_MODEL", ""),
 )
 if RAG_RERANKING_MODEL.value != "":
-    log.info(f"Reranking model set: {RAG_RERANKING_MODEL.value}"),
+    log.info(f"Reranking model set: {RAG_RERANKING_MODEL.value}")
 
 RAG_RERANKING_MODEL_AUTO_UPDATE = (
     os.environ.get("RAG_RERANKING_MODEL_AUTO_UPDATE", "").lower() == "true"
