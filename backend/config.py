@@ -4,7 +4,7 @@ import logging
 import importlib.metadata
 import pkgutil
 import chromadb
-from chromadb import Settings
+from chromadb.config import Settings
 from cryptography.fernet import Fernet
 from bs4 import BeautifulSoup
 import base64
@@ -228,6 +228,7 @@ WEBUI_SECRET_KEY = os.environ.get(
 # Config helpers
 ####################################
 
+
 def secret_key_to_fernet(secret_key: str) -> bytes:
     # convert to bytes
     encoded = secret_key.encode()
@@ -235,6 +236,7 @@ def secret_key_to_fernet(secret_key: str) -> bytes:
     hashed = hashlib.sha256(encoded).digest()
     # return the first 32 bytes
     return base64.urlsafe_b64encode(hashed)[:32]
+
 
 class PersistentConfig:
     def __init__(self, env_name: str, config_path: str, env_value):
@@ -313,7 +315,9 @@ class SecretConfig(PersistentConfig):
             if key in cur_config:
                 cur_config = cur_config[key]
             elif i == len(path_parts) - 1:
-                log.warn(f"Unencrypted value found for '{self.env_name}'. For better security, delete {self.config_path} from config.json")
+                log.warn(
+                    f"Unencrypted value found for '{self.env_name}'. For better security, delete {self.config_path} from config.json"
+                )
                 log.warn(f"Encrypting '{self.env_name}' and saving to config.json...")
                 self.config_value = self.value = cur_config
                 self.save()
