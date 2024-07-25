@@ -5,6 +5,7 @@ import importlib.metadata
 import pkgutil
 import chromadb
 from chromadb import Settings
+from cryptography.fernet import Fernet
 from bs4 import BeautifulSoup
 import base64
 import hashlib
@@ -258,8 +259,7 @@ class PersistentConfig:
                 self.value = self.env_value
                 break
         else:
-            self.config_value = cur_config
-            self.value = self.config_value
+            self.value = self.config_value = cur_config
             log.info(f"'{self.env_name}' loaded from config.json")
 
     def save(self):
@@ -285,7 +285,16 @@ class PersistentConfig:
 class SecretConfig(PersistentConfig):
     def __init__(self, env_name: str, config_path: str, env_value):
         self.encryped_env_name = f"{env_name}_ENCRYPTED"
+        self.fernet = Fernet(secret_key_to_fernet(WEBUI_SECRET_KEY))
+        if config_path.split(".")[-1] != "encrypted":
+            config_path += ".encrypted"
         super().__init__(env_name, config_path, env_value)
+
+    def encrypt(self, value):
+        return self.fernet.encrypt(value.encode()).decode()
+
+    def decrypt(self, value):
+        return self.fernet.decrypt(value.encode()).decode()
 
     def load(self):
         pass
