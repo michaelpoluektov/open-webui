@@ -238,17 +238,26 @@
 						class="w-full text-sm bg-transparent outline-none"
 						placeholder={searchPlaceholder}
 						autocomplete="off"
+						on:keydown={(e) => {
+							if (e.code === 'Enter' && filteredItems.length > 0) {
+								value = filteredItems[0].value;
+								show = false;
+							}
+						}}
 					/>
 				</div>
 
 				<hr class="border-gray-100 dark:border-gray-800" />
 			{/if}
 
-			<div class="px-3 my-2 max-h-64 overflow-y-auto scrollbar-hidden">
-				{#each filteredItems as item}
+			<div class="px-3 my-2 max-h-64 overflow-y-auto scrollbar-hidden group">
+				{#each filteredItems as item, index}
 					<button
 						aria-label="model-item"
-						class="flex w-full text-left font-medium line-clamp-1 select-none items-center rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-none transition-all duration-75 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg cursor-pointer data-[highlighted]:bg-muted"
+						class="flex w-full text-left font-medium line-clamp-1 select-none items-center rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-none transition-all duration-75 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg cursor-pointer data-[highlighted]:bg-muted {index ===
+						0
+							? 'bg-gray-100 dark:bg-gray-800 group-hover:bg-transparent'
+							: ''}"
 						on:click={() => {
 							value = item.value;
 
@@ -270,7 +279,14 @@
 							<div class="flex items-center gap-2">
 								<div class="flex items-center min-w-fit">
 									<div class="line-clamp-1">
-										{item.label}
+										<div class="flex items-center min-w-fit">
+											<img
+												src={item.model?.info?.meta?.profile_image_url ?? '/static/favicon.png'}
+												alt="Model"
+												class="rounded-full size-5 flex items-center mr-2"
+											/>
+											{item.label}
+										</div>
 									</div>
 									{#if item.model.owned_by === 'ollama' && (item.model.ollama?.details?.parameter_size ?? '') !== ''}
 										<div class="flex ml-1 items-center translate-y-[0.5px]">
