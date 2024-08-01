@@ -2134,7 +2134,7 @@ async def oauth_login(provider: str, request: Request):
     if provider not in OAUTH_PROVIDERS:
         raise HTTPException(404)
     # If the provider has a custom redirect URL, use that, otherwise automatically generate one
-    redirect_uri = OAUTH_PROVIDERS[provider].get("redirect_url") or request.url_for(
+    redirect_uri = OAUTH_PROVIDERS[provider].get("redirect_uri") or request.url_for(
         "oauth_callback", provider=provider
     )
     return await oauth.create_client(provider).authorize_redirect(request, redirect_uri)
