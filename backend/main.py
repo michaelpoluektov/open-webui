@@ -657,36 +657,45 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
             data_items.append({"citations": citations})
 
         body["metadata"] = metadata
-        modified_body_bytes = json.dumps(body).encode("utf-8")
-        # Replace the request body with the modified one
-        request._body = modified_body_bytes
-        # Set custom header to ensure content-length matches new body length
-        request.headers.__dict__["_list"] = [
-            (b"content-length", str(len(modified_body_bytes)).encode("utf-8")),
-            *[(k, v) for k, v in request.headers.raw if k.lower() != b"content-length"],
-        ]
 
+        def update_request_from_body(body):
+            modified_body_bytes = json.dumps(body).encode("utf-8")
+            # Replace the request body with the modified one
+            request._body = modified_body_bytes
+            # Set custom header to ensure content-length matches new body length
+            length = str(len(modified_body_bytes)).encode("utf-8")
+            other_headers = [
+                (k, v) for k, v in request.headers.raw if k.lower() != b"content-length"
+            ]
+            request.headers.__dict__["_list"] = [
+                (b"content-length", length),
+                *other_headers,
+            ]
+            return request
+
+        request = update_request_from_body(body)
         response = await call_next(request)
-        if isinstance(response, StreamingResponse):
-            content_type = response.headers["Content-Type"]
-            is_openai = "text/event-stream" in content_type
-            is_ollama = "application/x-ndjson" in content_type
-            if not is_openai and not is_ollama:
-                return response
+        if not isinstance(response, StreamingResponse):
+            return response
 
-            def wrap_item(item):
-                return f"data: {item}\n\n" if is_openai else f"{item}\n"
+        content_type = response.headers["Content-Type"]
+        is_openai = "text/event-stream" in content_type
+        is_ollama = "application/x-ndjson" in content_type
+        if not is_openai and not is_ollama:
+            return response
 
-            async def stream_wrapper(original_generator, data_items):
-                for item in data_items:
-                    yield wrap_item(json.dumps(item))
+        def wrap_item(item):
+            return f"data: {item}\n\n" if is_openai else f"{item}\n"
 
-                async for data in original_generator:
-                    yield data
+        async def stream_wrapper(original_generator, data_items):
+            for item in data_items:
+                yield wrap_item(json.dumps(item))
 
-            return StreamingResponse(stream_wrapper(response.body_iterator, data_items))
+            async for data in original_generator:
+                yield data
 
-        return response
+        stream = stream_wrapper(response.body_iterator, data_items)
+        return StreamingResponse(stream)
 
     async def _receive(self, body: bytes):
         return {"type": "http.request", "body": body, "more_body": False}
