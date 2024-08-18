@@ -1,4 +1,5 @@
 import base64
+from collections.abc import AsyncGenerator
 import uuid
 from contextlib import asynccontextmanager
 
@@ -460,26 +461,27 @@ def get_configured_tools(
 
 
 async def chat_completion_tools_handler(
-    body: dict, user: UserModel, extra_params: dict
+    body: dict, user: UserModel, extra_params: dict[str, dict]
 ) -> tuple[dict, dict]:
-    skip_files = False
-    contexts = []
-    citations = []
-    task_model_id = get_task_model_id(body["model"])
+    if not tools_filter:
+        return body, {}
 
-    # If tool_ids field is present, call the functions
-    tool_ids = body.pop("tool_ids", None)
+    tool_ids = body.pop("tool_ids", [])
     if not tool_ids:
         return body, {}
 
     log.debug(f"{tool_ids=}")
     custom_params = {
         **extra_params,
-        "__model__": app.state.MODELS[task_model_id],
+        "__model__": app.state.MODELS[get_task_model_id(body["model"])],
         "__messages__": body["messages"],
         "__files__": body.get("files", []),
     }
     configured_tools = get_configured_tools(tool_ids, custom_params, user)
+    skip_files = False
+    contexts = []
+    citations = []
+    task_model_id = get_task_model_id(body["model"])
 
     log.info(f"{configured_tools=}")
 
@@ -539,6 +541,9 @@ async def chat_completion_tools_handler(
 
 
 async def chat_completion_files_handler(body) -> tuple[dict, dict[str, list]]:
+    if not files_filter:
+        return body, {}
+
     contexts = []
     citations = []
 
@@ -565,6 +570,114 @@ def is_chat_completion_request(request):
     )
 
 
+# UNUSED YET
+# As soon as Python implements AsyncGenerator's returning values, this should
+# be refactored to return accumulated_response and used with yield from
+async def accumulate_response(
+    res: Response,
+) -> AsyncGenerator[tuple[bool, str | bytes]]:
+    print("enter accumulate_response")
+    if not isinstance(res, StreamingResponse):
+        yield True, res.body
+        return
+    accumulated_response = ""
+    async for data in res.body_iterator:
+        match data:
+            case bytes():
+                chunk = data.decode("utf-8")
+            case str():
+                chunk = data
+            case _:
+                raise TypeError(f"Unexpected data type: {type(data)}")
+        chunk = chunk.strip().strip("data: ")
+        if not chunk:
+            print("CONTINUE")
+            continue
+        if chunk == "[DONE]":
+            yield True, accumulated_response
+            return
+        yield False, data
+        chunk = json.loads(chunk)
+        choice = chunk["choices"][0]
+        if choice["finish_reason"] is not None:
+            yield True, accumulated_response
+            return
+        if "delta" in choice:
+            content = choice["delta"]["content"]
+        else:
+            content = choice["message"]["content"]
+        accumulated_response += content or ""
+    yield True, accumulated_response
+
+
+# UNUSED YET
+async def tools_wrapper(call_next, body, request, configured_tools, user):
+    while True:
+        print("hey")
+        request = update_request_with_body(request, body)
+        print("call_next")
+        print(call_next)
+        try:
+            # res = await call_next(request)
+            res = await generate_chat_completions(form_data=body, user=user)
+            print(res)
+        except Exception as e:
+            log.exception(e)
+            raise e
+        response = None
+        async for is_final, data in accumulate_response(res):
+            log.debug(data)
+            if is_final:
+                response = data
+            else:
+                yield data
+        if response is None:
+            raise Exception("No response")
+        try:
+            message = json.loads(response)
+        except json.JSONDecodeError:
+            message = response
+            yield "data: [DONE]"
+            return
+        choice = message["choices"][0]
+        log.debug(f"{choice = }")
+        if choice["finish_reason"] != "tool_calls":
+            yield "data: [DONE]"
+            return
+        tools = choice["message"]["tool_calls"]
+        for tool in tools:
+            tool_call_id = tool["id"]
+            func = tool["function"]
+            name = func["name"]
+            params = json.loads(func["arguments"])
+            result = await configured_tools[name]["callable"](**params)
+            message = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": name,
+                "content": result,
+            }
+            yield "data: [TOOL]"
+            yield f"data: {json.dumps(message)}\n\n"
+            body["messages"].append(message)
+
+
+def update_request_with_body(request, body):
+    modified_body_bytes = json.dumps(body).encode("utf-8")
+    # Replace the request body with the modified one
+    request._body = modified_body_bytes
+    # Set custom header to ensure content-length matches new body length
+    length = str(len(modified_body_bytes)).encode("utf-8")
+    other_headers = [
+        (k, v) for k, v in request.headers.raw if k.lower() != b"content-length"
+    ]
+    request.headers.__dict__["_list"] = [(b"content-length", length), *other_headers]
+    return request
+
+
+# This is implemented as middleware because it handles both generate_chat_completion
+# And the Ollama chat completions endpoint. The frontend still calls the Ollama chat completions endpoint
+# separately
 class ChatCompletionMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not is_chat_completion_request(request):
@@ -658,22 +771,7 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
 
         body["metadata"] = metadata
 
-        def update_request_from_body(body):
-            modified_body_bytes = json.dumps(body).encode("utf-8")
-            # Replace the request body with the modified one
-            request._body = modified_body_bytes
-            # Set custom header to ensure content-length matches new body length
-            length = str(len(modified_body_bytes)).encode("utf-8")
-            other_headers = [
-                (k, v) for k, v in request.headers.raw if k.lower() != b"content-length"
-            ]
-            request.headers.__dict__["_list"] = [
-                (b"content-length", length),
-                *other_headers,
-            ]
-            return request
-
-        request = update_request_from_body(body)
+        request = update_request_with_body(request, body)
         response = await call_next(request)
         if not isinstance(response, StreamingResponse):
             return response
