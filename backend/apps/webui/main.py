@@ -1,61 +1,58 @@
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from apps.webui.routers import (
-    auths,
-    users,
-    chats,
-    documents,
-    tools,
-    models,
-    prompts,
-    configs,
-    memories,
-    utils,
-    files,
-    functions,
-)
+import inspect
+import json
+from typing import AsyncGenerator, Generator, Iterator
+
+from apps.socket.main import get_event_call, get_event_emitter
 from apps.webui.models.functions import Functions
 from apps.webui.models.models import Models
-from apps.webui.utils import load_function_module_by_id
-
-from utils.misc import (
-    openai_chat_chunk_message_template,
-    openai_chat_completion_message_template,
-    apply_model_params_to_body_openai,
-    apply_model_system_prompt_to_body,
+from apps.webui.routers import (
+    auths,
+    chats,
+    configs,
+    documents,
+    files,
+    functions,
+    memories,
+    models,
+    prompts,
+    tools,
+    users,
+    utils,
 )
-
-
+from apps.webui.utils import load_function_module_by_id
 from config import (
-    SHOW_ADMIN_DETAILS,
     ADMIN_EMAIL,
-    WEBUI_AUTH,
     DEFAULT_MODELS,
     DEFAULT_PROMPT_SUGGESTIONS,
     DEFAULT_USER_ROLE,
-    ENABLE_SIGNUP,
+    ENABLE_COMMUNITY_SHARING,
     ENABLE_LOGIN_FORM,
+    ENABLE_SIGNUP,
+    ENABLE_TOOLS_FILTER,
+    JWT_EXPIRES_IN,
+    OAUTH_EMAIL_CLAIM,
+    OAUTH_PICTURE_CLAIM,
+    OAUTH_USERNAME_CLAIM,
+    SHOW_ADMIN_DETAILS,
     USER_PERMISSIONS,
     WEBHOOK_URL,
+    WEBUI_AUTH,
     WEBUI_AUTH_TRUSTED_EMAIL_HEADER,
     WEBUI_AUTH_TRUSTED_NAME_HEADER,
-    JWT_EXPIRES_IN,
     WEBUI_BANNERS,
-    ENABLE_COMMUNITY_SHARING,
     AppConfig,
-    OAUTH_USERNAME_CLAIM,
-    OAUTH_PICTURE_CLAIM,
-    OAUTH_EMAIL_CLAIM,
 )
-
-from apps.socket.main import get_event_call, get_event_emitter
-
-import inspect
-import json
-
-from typing import Iterator, Generator, AsyncGenerator
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from utils.misc import (
+    apply_model_params_to_body_openai,
+    apply_model_system_prompt_to_body,
+    openai_chat_chunk_message_template,
+    openai_chat_completion_message_template,
+)
+from utils.tools import get_configured_tools
 
 app = FastAPI()
 
@@ -271,7 +268,7 @@ def get_function_params(function_module, form_data, user, extra_params={}):
     return params
 
 
-async def generate_function_chat_completion(form_data, user):
+async def generate_function_chat_completion(form_data, user, files, tool_ids):
     model_id = form_data.get("model")
     model_info = Models.get_model_by_id(model_id)
     metadata = form_data.pop("metadata", None)
@@ -286,6 +283,22 @@ async def generate_function_chat_completion(form_data, user):
             __event_call__ = get_event_call(metadata)
         __task__ = metadata.get("task", None)
 
+    extra_params = {
+        "__event_emitter__": __event_emitter__,
+        "__event_call__": __event_call__,
+        "__task__": __task__,
+    }
+    if not ENABLE_TOOLS_FILTER:
+        tools_params = {
+            **extra_params,
+            "__model__": app.state.MODELS[form_data["model"]],
+            "__messages__": form_data["messages"],
+            "__files__": files,
+        }
+        configured_tools = get_configured_tools(app, tool_ids, tools_params, user)
+
+        extra_params["__tools__"] = configured_tools
+
     if model_info:
         if model_info.base_model_id:
             form_data["model"] = model_info.base_model_id
@@ -298,16 +311,7 @@ async def generate_function_chat_completion(form_data, user):
     function_module = get_function_module(pipe_id)
 
     pipe = function_module.pipe
-    params = get_function_params(
-        function_module,
-        form_data,
-        user,
-        {
-            "__event_emitter__": __event_emitter__,
-            "__event_call__": __event_call__,
-            "__task__": __task__,
-        },
-    )
+    params = get_function_params(function_module, form_data, user, extra_params)
 
     if form_data["stream"]:
 
