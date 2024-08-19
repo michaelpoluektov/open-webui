@@ -52,15 +52,14 @@ from apps.webui.internal.db import Session
 
 
 from pydantic import BaseModel
-from typing import Optional, Callable, Awaitable
+from typing import Optional
 
 from apps.webui.models.auths import Auths
 from apps.webui.models.models import Models
-from apps.webui.models.tools import Tools
 from apps.webui.models.functions import Functions
 from apps.webui.models.users import Users, UserModel
 
-from apps.webui.utils import load_toolkit_module_by_id, load_function_module_by_id
+from apps.webui.utils import load_function_module_by_id
 
 from utils.utils import (
     get_admin_user,
@@ -81,6 +80,8 @@ from utils.misc import (
     prepend_to_first_user_message_content,
     parse_duration,
 )
+
+from utils.tools import get_configured_tools
 
 from apps.rag.utils import get_rag_context, rag_template
 
@@ -118,6 +119,8 @@ from config import (
     WEBUI_SESSION_COOKIE_SAME_SITE,
     WEBUI_SESSION_COOKIE_SECURE,
     ENABLE_ADMIN_CHAT_ACCESS,
+    ENABLE_TOOLS_FILTER,
+    ENABLE_FILES_FILTER,
     AppConfig,
 )
 
@@ -385,105 +388,32 @@ async def chat_completion_inlets_handler(body, model, extra_params):
     return body, {}
 
 
-def get_tool_with_custom_params(
-    tool: Callable, custom_params: dict
-) -> Callable[..., Awaitable]:
-    sig = inspect.signature(tool)
-    extra_params = {
-        key: value for key, value in custom_params.items() if key in sig.parameters
-    }
-    is_coroutine = inspect.iscoroutinefunction(tool)
-
-    async def new_tool(**kwargs):
-        extra_kwargs = kwargs | extra_params
-        if is_coroutine:
-            return await tool(**extra_kwargs)
-        return tool(**extra_kwargs)
-
-    return new_tool
-
-
 # Mutation on extra_params
-def get_configured_tools(
-    tool_ids: list[str], extra_params: dict, user: UserModel
-) -> dict[str, dict]:
-    tools = {}
-    for tool_id in tool_ids:
-        toolkit = Tools.get_tool_by_id(tool_id)
-        if toolkit is None:
-            continue
-
-        module = webui_app.state.TOOLS.get(tool_id, None)
-        if module is None:
-            module, _ = load_toolkit_module_by_id(tool_id)
-            webui_app.state.TOOLS[tool_id] = module
-
-        extra_params["__id__"] = tool_id
-        has_citation = hasattr(module, "citation") and module.citation
-        handles_files = hasattr(module, "file_handler") and module.file_handler
-        if hasattr(module, "valves") and hasattr(module, "Valves"):
-            valves = Tools.get_tool_valves_by_id(tool_id) or {}
-            module.valves = module.Valves(**valves)
-
-        if hasattr(module, "UserValves"):
-            extra_params["__user__"]["valves"] = module.UserValves(  # type: ignore
-                **Tools.get_user_valves_by_id_and_user_id(tool_id, user.id)
-            )
-
-        for spec in toolkit.specs:
-            # TODO: Fix hack for OpenAI API
-            for val in spec.get("parameters", {}).get("properties", {}).values():
-                if val["type"] == "str":
-                    val["type"] = "string"
-            name = spec["name"]
-            callable = getattr(module, name)
-
-            # convert to function that takes only model params and inserts custom params
-            custom_callable = get_tool_with_custom_params(callable, extra_params)
-
-            # TODO: This needs to be a pydantic model
-            tool_dict = {
-                "spec": spec,
-                "citation": has_citation,
-                "file_handler": handles_files,
-                "toolkit_id": tool_id,
-                "callable": custom_callable,
-            }
-            # TODO: if collision, prepend toolkit name
-            if name in tools:
-                log.warning(f"Tool {name} already exists in another toolkit!")
-                log.warning(f"Collision between {toolkit} and {tool_id}.")
-                log.warning(f"Discarding {toolkit}.{name}")
-            else:
-                tools[name] = tool_dict
-
-    return tools
-
-
 async def chat_completion_tools_handler(
     body: dict, user: UserModel, extra_params: dict[str, dict]
 ) -> tuple[dict, dict]:
-    if not tools_filter:
+    log.debug(f"{ENABLE_TOOLS_FILTER = }")
+    if not ENABLE_TOOLS_FILTER:
         return body, {}
 
     tool_ids = body.pop("tool_ids", [])
     if not tool_ids:
         return body, {}
 
-    log.debug(f"{tool_ids=}")
+    log.debug(f"{tool_ids = }")
     custom_params = {
         **extra_params,
         "__model__": app.state.MODELS[get_task_model_id(body["model"])],
         "__messages__": body["messages"],
         "__files__": body.get("files", []),
     }
-    configured_tools = get_configured_tools(tool_ids, custom_params, user)
+    configured_tools = get_configured_tools(webui_app, tool_ids, custom_params, user)
     skip_files = False
     contexts = []
     citations = []
     task_model_id = get_task_model_id(body["model"])
 
-    log.info(f"{configured_tools=}")
+    log.debug(f"{configured_tools = }")
 
     specs = [tool["spec"] for tool in configured_tools.values()]
     tools_specs = json.dumps(specs)
@@ -512,6 +442,7 @@ async def chat_completion_tools_handler(
         toolkit_id = configured_tools[tool_name]["toolkit_id"]
         try:
             tool_output = await configured_tools[tool_name]["callable"](**tool_params)
+            log.debug(f"{tool_output = }")
         except Exception as e:
             tool_output = str(e)
         if configured_tools[tool_name]["citation"]:
@@ -529,7 +460,7 @@ async def chat_completion_tools_handler(
             contexts.append(tool_output)
 
     except Exception as e:
-        print(f"Error: {e}")
+        log.exception(f"Error: {e}")
         content = None
 
     log.debug(f"tool_contexts: {contexts}")
@@ -541,7 +472,7 @@ async def chat_completion_tools_handler(
 
 
 async def chat_completion_files_handler(body) -> tuple[dict, dict[str, list]]:
-    if not files_filter:
+    if not ENABLE_FILES_FILTER:
         return body, {}
 
     contexts = []
@@ -1152,9 +1083,13 @@ async def generate_chat_completions(form_data: dict, user=Depends(get_verified_u
             detail="Model not found",
         )
     model = app.state.MODELS[model_id]
+    files = form_data.pop("files", [])
+    tool_ids = form_data.pop("tool_ids", [])
 
     if model.get("pipe"):
-        return await generate_function_chat_completion(form_data, user=user)
+        return await generate_function_chat_completion(
+            form_data, user=user, files=files, tool_ids=tool_ids
+        )
     if model["owned_by"] == "ollama":
         return await generate_ollama_chat_completion(form_data, user=user)
     else:
